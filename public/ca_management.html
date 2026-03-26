@@ -35,14 +35,41 @@
                     <option value="leaf">Leaf CA</option>
                 </select>
 
-                <label for="caCert">Certificate (PEM):</label>
-                <textarea id="caCert" rows="8" placeholder="-----BEGIN CERTIFICATE-----..." required></textarea>
+                <label>
+                    <input type="checkbox" id="autoGenerate" checked>
+                    Auto-generate certificate and key
+                </label>
 
-                <label for="caKey">Private Key (PEM):</label>
-                <textarea id="caKey" rows="8" placeholder="-----BEGIN EC PRIVATE KEY-----..." required></textarea>
+                <div id="signingCASection">
+                    <label for="signingCA">Signing CA:</label>
+                    <select id="signingCA">
+                        <option value="0">Root CA</option>
+                    </select>
+                </div>
+
+                <div id="manualInputSection" style="display: none;">
+                    <label for="caCert">Certificate (PEM):</label>
+                    <textarea id="caCert" rows="8" placeholder="-----BEGIN CERTIFICATE-----..."></textarea>
+
+                    <label for="caKey">Private Key (PEM):</label>
+                    <textarea id="caKey" rows="8" placeholder="-----BEGIN EC PRIVATE KEY-----..."></textarea>
+                </div>
 
                 <button type="submit">Add CA</button>
             </form>
+
+            <div id="generatedCASection" style="display: none; margin-top: 1rem;">
+                <h4>Generated CA Certificate and Key</h4>
+                <p><strong>⚠️ Important:</strong> Save the private key securely. It will not be displayed again.</p>
+
+                <label for="generatedCert">Certificate (PEM):</label>
+                <textarea id="generatedCert" rows="8" readonly></textarea>
+
+                <label for="generatedKey">Private Key (PEM):</label>
+                <textarea id="generatedKey" rows="8" readonly></textarea>
+
+                <button onclick="downloadCA()">Download Certificate & Key</button>
+            </div>
         </section>
 
         <hr>
@@ -67,7 +94,14 @@
     </main>
 
     <script>
-        // Load CAs on page load
+        // Toggle between auto-generate and manual input
+        document.getElementById('autoGenerate').addEventListener('change', (e) => {
+            const autoGenerate = e.target.checked;
+            document.getElementById('signingCASection').style.display = autoGenerate ? 'block' : 'none';
+            document.getElementById('manualInputSection').style.display = autoGenerate ? 'none' : 'block';
+        });
+
+        // Load CAs on page load and populate signing CA dropdown
         async function loadCAs() {
             try {
                 const response = await fetch('/api/cas');
@@ -83,6 +117,10 @@
                 const cas = await response.json();
                 const tbody = document.getElementById('caTableBody');
                 tbody.innerHTML = '';
+
+                // Update signing CA dropdown
+                const signingCASelect = document.getElementById('signingCA');
+                signingCASelect.innerHTML = '<option value="0">Root CA</option>';
 
                 if (!cas || cas.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="4" style="text-align: center;">No CAs found</td></tr>';
@@ -105,6 +143,14 @@
                         <td>${deleteButton}</td>
                     `;
                     tbody.appendChild(tr);
+
+                    // Add intermediate CAs to signing CA dropdown
+                    if (ca.ca_type === 'intermediate' && ca.id !== 0) {
+                        const option = document.createElement('option');
+                        option.value = ca.id;
+                        option.textContent = ca.name;
+                        signingCASelect.appendChild(option);
+                    }
                 });
             } catch (err) {
                 console.error('Error loading CAs:', err);
@@ -118,8 +164,29 @@
 
             const name = document.getElementById('caName').value;
             const caType = document.getElementById('caType').value;
-            const certPEM = document.getElementById('caCert').value;
-            const keyPEM = document.getElementById('caKey').value;
+            const autoGenerate = document.getElementById('autoGenerate').checked;
+            const signingCAID = parseInt(document.getElementById('signingCA').value) || 0;
+
+            let requestBody = {
+                name: name,
+                ca_type: caType,
+                auto_generate: autoGenerate
+            };
+
+            if (autoGenerate) {
+                requestBody.signing_ca_id = signingCAID;
+            } else {
+                const certPEM = document.getElementById('caCert').value;
+                const keyPEM = document.getElementById('caKey').value;
+
+                if (!certPEM || !keyPEM) {
+                    alert('Please provide both certificate and private key');
+                    return;
+                }
+
+                requestBody.cert_pem = certPEM;
+                requestBody.key_pem = keyPEM;
+            }
 
             try {
                 const response = await fetch('/api/cas/add', {
@@ -127,12 +194,7 @@
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        name: name,
-                        ca_type: caType,
-                        cert_pem: certPEM,
-                        key_pem: keyPEM
-                    })
+                    body: JSON.stringify(requestBody)
                 });
 
                 if (!response.ok) {
@@ -145,10 +207,23 @@
                     throw new Error(errorText || 'Failed to add CA');
                 }
 
-                alert('CA added successfully!');
+                // If auto-generated, display the certificate and key
+                if (autoGenerate) {
+                    const data = await response.json();
+                    document.getElementById('generatedCert').value = data.cert_pem;
+                    document.getElementById('generatedKey').value = data.key_pem;
+                    document.getElementById('generatedCASection').style.display = 'block';
+
+                    alert('CA added successfully! Please save the private key securely.');
+                } else {
+                    alert('CA added successfully!');
+                }
 
                 // Clear form
                 document.getElementById('addCAForm').reset();
+                document.getElementById('autoGenerate').checked = true;
+                document.getElementById('signingCASection').style.display = 'block';
+                document.getElementById('manualInputSection').style.display = 'none';
 
                 // Reload CA list
                 loadCAs();
@@ -157,6 +232,31 @@
                 alert('Error adding CA: ' + err.message);
             }
         });
+
+        // Download generated CA certificate and key
+        function downloadCA() {
+            const cert = document.getElementById('generatedCert').value;
+            const key = document.getElementById('generatedKey').value;
+            const name = document.getElementById('caName').value || 'ca';
+
+            // Download certificate
+            const certBlob = new Blob([cert], { type: 'application/x-pem-file' });
+            const certUrl = URL.createObjectURL(certBlob);
+            const certLink = document.createElement('a');
+            certLink.href = certUrl;
+            certLink.download = `${name}_cert.pem`;
+            certLink.click();
+            URL.revokeObjectURL(certUrl);
+
+            // Download key
+            const keyBlob = new Blob([key], { type: 'application/x-pem-file' });
+            const keyUrl = URL.createObjectURL(keyBlob);
+            const keyLink = document.createElement('a');
+            keyLink.href = keyUrl;
+            keyLink.download = `${name}_key.pem`;
+            keyLink.click();
+            URL.revokeObjectURL(keyUrl);
+        }
 
         // Delete CA function
         async function deleteCA(id) {
