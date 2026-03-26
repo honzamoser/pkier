@@ -1,0 +1,12 @@
+[dn]
+cn = "jan Moser"
+
+[policy]
+allow_wildcaards = true
+min_rsa_bits = 2048
+allowed_domains = ["localhost"]
+
+[policy.default_sans]
+dns = ["localhost", "mosii.xyz", "*.mosii.xyz"]
+ips = ["127.0.0.1"]
+
