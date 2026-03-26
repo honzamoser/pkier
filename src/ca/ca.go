@@ -142,19 +142,80 @@ func createKeyFiles() (*os.File, *os.File) {
 	}
 }
 
+func generateCA(name, caType string, signingCAID int) (certPEM, keyPEM string, err error) {
+	// Get signing CA (default to root CA if not specified or not found)
+	signingCA, ok := caRegistry[signingCAID]
+	if !ok || signingCA.PrivKey == nil {
+		signingCA = caRegistry[0] // Use root CA
+	}
+
+	// Generate new private key
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate private key: %w", err)
+	}
+
+	// Generate serial number
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate serial number: %w", err)
+	}
+
+	// Set certificate validity based on type
+	notBefore := time.Now()
+	var notAfter time.Time
+	var isCA bool
+	if caType == "intermediate" {
+		notAfter = notBefore.AddDate(5, 0, 0) // 5 years for intermediate CA
+		isCA = true
+	} else {
+		notAfter = notBefore.AddDate(3, 0, 0) // 3 years for leaf CA
+		isCA = true
+	}
+
+	// Create certificate template
+	template := x509.Certificate{
+		SerialNumber:          serialNumber,
+		Subject:               pkix.Name{CommonName: name},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		IsCA:                  isCA,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+
+	// Sign the certificate
+	certBytes, err := x509.CreateCertificate(rand.Reader, &template, signingCA.Cert, &privKey.PublicKey, signingCA.PrivKey)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	// Encode certificate to PEM
+	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBytes}))
+
+	// Encode private key to PEM
+	keyBytes, err := x509.MarshalECPrivateKey(privKey)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to marshal private key: %w", err)
+	}
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes}))
+
+	return certPEM, keyPEM, nil
+}
+
 func HandleListCAs(w http.ResponseWriter, r *http.Request) {
     if !auth.ValidateAuthentication(r) {
         http.Error(w, "Unauthorized", http.StatusUnauthorized)
         return
     }
-    
+
     type caResp struct {
         ID int `json:"id"`
         Name string `json:"name"`
         CAType string `json:"ca_type"`
         CertPEM string `json:"cert_pem"`
     }
-    
+
     var resp []caResp
     for _, ca := range caRegistry {
         resp = append(resp, caResp{
@@ -164,7 +225,7 @@ func HandleListCAs(w http.ResponseWriter, r *http.Request) {
             CertPEM: ca.CertPEM,
         })
     }
-    
+
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(resp)
 }
@@ -180,23 +241,56 @@ func HandleAddCA(w http.ResponseWriter, r *http.Request) {
     }
 
     var req struct {
-        Name    string `json:"name"`
-        CAType  string `json:"ca_type"`
-        CertPEM string `json:"cert_pem"`
-        KeyPEM  string `json:"key_pem"`
+        Name          string `json:"name"`
+        CAType        string `json:"ca_type"`
+        CertPEM       string `json:"cert_pem"`
+        KeyPEM        string `json:"key_pem"`
+        AutoGenerate  bool   `json:"auto_generate"`
+        SigningCAID   int    `json:"signing_ca_id"`
     }
     if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
         http.Error(w, "Invalid Request", http.StatusBadRequest)
         return
     }
 
-    if err := db.InsertCA(req.Name, req.CAType, req.CertPEM, req.KeyPEM); err != nil {
+    var certPEM, keyPEM string
+    var err error
+
+    // If auto_generate is true, generate the certificate and key
+    if req.AutoGenerate {
+        certPEM, keyPEM, err = generateCA(req.Name, req.CAType, req.SigningCAID)
+        if err != nil {
+            http.Error(w, fmt.Sprintf("Failed to generate CA: %v", err), http.StatusInternalServerError)
+            return
+        }
+    } else {
+        // Use provided certificate and key
+        if req.CertPEM == "" || req.KeyPEM == "" {
+            http.Error(w, "Certificate and key are required when not auto-generating", http.StatusBadRequest)
+            return
+        }
+        certPEM = req.CertPEM
+        keyPEM = req.KeyPEM
+    }
+
+    if err := db.InsertCA(req.Name, req.CAType, certPEM, keyPEM); err != nil {
         http.Error(w, "DB Insert Error", http.StatusInternalServerError)
         return
     }
-    
+
     InitCA()
-    w.Write([]byte("OK"))
+
+    // Return the generated certificate and key if auto-generated
+    if req.AutoGenerate {
+        response := map[string]string{
+            "cert_pem": certPEM,
+            "key_pem":  keyPEM,
+        }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(response)
+    } else {
+        w.Write([]byte("OK"))
+    }
 }
 
 func HandleDeleteCA(w http.ResponseWriter, r *http.Request) {

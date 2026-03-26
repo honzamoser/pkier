@@ -1,0 +1,13 @@
+# Binary
+pkier
+
+# Database
+light_pki.db
+
+# Keys
+keys/
+
+# IDE
+.vscode/
+.idea/
+*.swp

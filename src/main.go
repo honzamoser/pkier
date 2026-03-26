@@ -35,6 +35,9 @@ func main() {
 	ca.InitCA()
 
 	server.RegisterHandler("/api/sign", ca.HandleSignCSR)
+	server.RegisterHandler("/api/cas", ca.HandleListCAs)
+	server.RegisterHandler("/api/cas/add", ca.HandleAddCA)
+	server.RegisterHandler("/api/cas/delete", ca.HandleDeleteCA)
 	server.RegisterHandler("/api/auth", auth.SignIn)
 	server.RegisterHandler("/api/passkey/register/begin", auth.BeginPasskeyRegistration)
 	server.RegisterHandler("/api/passkey/register/finish", auth.FinishPasskeyRegistration)
