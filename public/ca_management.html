@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CA Structure Management</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css">
+</head>
+
+<body>
+    <nav class="navbar" style="display: flex; justify-content: center; align-items: center; gap: 1rem;">
+        <a href="/index.html">Home</a>
+        <a href="/csr.html">Generate CSR</a>
+        <a href="/ca_management.html">Manage CAs</a>
+        <a href="/register_passkey.html">Register Passkey</a>
+        <a href="/login.html">Login</a>
+    </nav>
+    <main class="container">
+        <hgroup>
+            <h1>CA Structure Management</h1>
+            <h2>Manage Intermediate and Leaf Certificate Authorities</h2>
+        </hgroup>
+
+        <section>
+            <h3>Add New CA</h3>
+            <form id="addCAForm">
+                <label for="caName">CA Name:</label>
+                <input type="text" id="caName" placeholder="e.g., Intermediate CA 1" required>
+
+                <label for="caType">CA Type:</label>
+                <select id="caType" required>
+                    <option value="">Select CA Type</option>
+                    <option value="intermediate">Intermediate CA</option>
+                    <option value="leaf">Leaf CA</option>
+                </select>
+
+                <label for="caCert">Certificate (PEM):</label>
+                <textarea id="caCert" rows="8" placeholder="-----BEGIN CERTIFICATE-----..." required></textarea>
+
+                <label for="caKey">Private Key (PEM):</label>
+                <textarea id="caKey" rows="8" placeholder="-----BEGIN EC PRIVATE KEY-----..." required></textarea>
+
+                <button type="submit">Add CA</button>
+            </form>
+        </section>
+
+        <hr>
+
+        <section>
+            <h3>Existing Certificate Authorities</h3>
+            <figure>
+                <table role="grid">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Name</th>
+                            <th>Type</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="caTableBody">
+                    </tbody>
+                </table>
+            </figure>
+        </section>
+    </main>
+
+    <script>
+        // Load CAs on page load
+        async function loadCAs() {
+            try {
+                const response = await fetch('/api/cas');
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        alert('Please login first');
+                        window.location.href = '/login.html';
+                        return;
+                    }
+                    throw new Error('Failed to load CAs');
+                }
+
+                const cas = await response.json();
+                const tbody = document.getElementById('caTableBody');
+                tbody.innerHTML = '';
+
+                if (!cas || cas.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" style="text-align: center;">No CAs found</td></tr>';
+                    return;
+                }
+
+                cas.forEach(ca => {
+                    const tr = document.createElement('tr');
+
+                    // Determine if this is the root CA (ID 0)
+                    const isRoot = ca.id === 0;
+                    const deleteButton = isRoot
+                        ? '<kbd style="background-color: var(--secondary);">Root (Cannot Delete)</kbd>'
+                        : `<button onclick="deleteCA(${ca.id})" style="padding: 0.25rem 0.5rem; font-size: 0.875rem;">Delete</button>`;
+
+                    tr.innerHTML = `
+                        <td>${ca.id}</td>
+                        <td>${ca.name}</td>
+                        <td><kbd>${ca.ca_type}</kbd></td>
+                        <td>${deleteButton}</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+            } catch (err) {
+                console.error('Error loading CAs:', err);
+                alert('Error loading CAs: ' + err.message);
+            }
+        }
+
+        // Handle form submission
+        document.getElementById('addCAForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const name = document.getElementById('caName').value;
+            const caType = document.getElementById('caType').value;
+            const certPEM = document.getElementById('caCert').value;
+            const keyPEM = document.getElementById('caKey').value;
+
+            try {
+                const response = await fetch('/api/cas/add', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        name: name,
+                        ca_type: caType,
+                        cert_pem: certPEM,
+                        key_pem: keyPEM
+                    })
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        alert('Please login first');
+                        window.location.href = '/login.html';
+                        return;
+                    }
+                    const errorText = await response.text();
+                    throw new Error(errorText || 'Failed to add CA');
+                }
+
+                alert('CA added successfully!');
+
+                // Clear form
+                document.getElementById('addCAForm').reset();
+
+                // Reload CA list
+                loadCAs();
+            } catch (err) {
+                console.error('Error adding CA:', err);
+                alert('Error adding CA: ' + err.message);
+            }
+        });
+
+        // Delete CA function
+        async function deleteCA(id) {
+            if (!confirm('Are you sure you want to delete this CA?')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/cas/delete?id=${id}`, {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        alert('Please login first');
+                        window.location.href = '/login.html';
+                        return;
+                    }
+                    const errorText = await response.text();
+                    throw new Error(errorText || 'Failed to delete CA');
+                }
+
+                alert('CA deleted successfully!');
+                loadCAs();
+            } catch (err) {
+                console.error('Error deleting CA:', err);
+                alert('Error deleting CA: ' + err.message);
+            }
+        }
+
+        // Load CAs on page load
+        loadCAs();
+    </script>
+</body>
+
+</html>

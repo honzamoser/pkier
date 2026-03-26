@@ -66,7 +66,15 @@ func InitalizeDB() {
 		admin_id INTEGER NOT NULL,
 		FOREIGN KEY (admin_id) REFERENCES admins(id)
 	);
-	
+
+	CREATE TABLE IF NOT EXISTS certificate_authorities (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
+		ca_type TEXT NOT NULL,
+		cert_pem TEXT NOT NULL,
+		key_pem TEXT NOT NULL
+	);
+
 	INSERT OR IGNORE INTO admins (username, password_hash) VALUES ('admin', ?);`
 	if _, err := Db.Exec(query, defaultPasswordHash); err != nil {
 		log.Printf("DB setup error: %v", err)
@@ -243,4 +251,42 @@ func GetAdminWebAuthnCredentials(username string) ([]webauthn.Credential, error)
 	}
 
 	return credentials, nil
+}
+
+type CARecord struct {
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	CAType  string `json:"ca_type"`
+	CertPEM string `json:"cert_pem"`
+	KeyPEM  string `json:"key_pem"`
+}
+
+func GetCAs() ([]CARecord, error) {
+	rows, err := Db.Query("SELECT id, name, ca_type, cert_pem, key_pem FROM certificate_authorities ORDER BY id ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cas := []CARecord{}
+	for rows.Next() {
+		var ca CARecord
+		if err := rows.Scan(&ca.ID, &ca.Name, &ca.CAType, &ca.CertPEM, &ca.KeyPEM); err != nil {
+			continue
+		}
+		cas = append(cas, ca)
+	}
+
+	return cas, nil
+}
+
+func InsertCA(name, caType, certPEM, keyPEM string) error {
+	_, err := Db.Exec(`INSERT INTO certificate_authorities (name, ca_type, cert_pem, key_pem) VALUES (?, ?, ?, ?)`,
+		name, caType, certPEM, keyPEM)
+	return err
+}
+
+func DeleteCA(id int) error {
+	_, err := Db.Exec("DELETE FROM certificate_authorities WHERE id = ?", id)
+	return err
 }
