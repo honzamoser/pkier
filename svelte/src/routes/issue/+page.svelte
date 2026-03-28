@@ -136,11 +136,19 @@
             statusHtml = '<progress></progress><p style="text-align:center;">Sending CSR to server for signing...</p>';
             btnText = 'Signing...';
 
-            let signUrl = `/api/sign?csr=${encodeURIComponent(pemCsr)}`;
-            if (ekuServer) signUrl += '&server=true';
-            if (ekuClient) signUrl += '&client=true';
+            let signUrl = `/api/sign?`;
+            const params = new URLSearchParams();
+            if (ekuServer) params.append('server', 'true');
+            if (ekuClient) params.append('client', 'true');
+            signUrl += params.toString();
 
-            const signResp = await fetch(signUrl, { method: 'POST' });
+            const signResp = await fetch(signUrl, { 
+                method: 'POST',
+                body: pemCsr,
+                headers: {
+                    'Content-Type': 'text/plain'
+                }
+            });
             if (!signResp.ok) {
                 const errText = await signResp.text();
                 throw new Error('Signing failed: ' + errText);

@@ -212,7 +212,7 @@ func HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 	db.SaveSignedSignature(
 		serialNumber.String(),
 		csr.Subject.CommonName,
-		"Valid",
+		"ACTIVE",
 		notBefore.Format("2006-01-02 15:04"),
 		notAfter.Format("2006-01-02 15:04"),
 		string(certPEM),

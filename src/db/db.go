@@ -16,10 +16,12 @@ import (
 var Db *sql.DB
 
 type CertRecord struct {
-	Serial  string `json:"serial"`
-	Subject string `json:"subject"`
-	Status  string `json:"status"`
-	Expiry  string `json:"expiry"`
+	Serial    string `json:"serial"`
+	Subject   string `json:"subject"`
+	Status    string `json:"status"`
+	NotBefore string `json:"not_before,omitempty"`
+	NotAfter  string `json:"not_after,omitempty"`
+	Expiry    string `json:"expiry,omitempty"`
 }
 
 // CertificateRequest represents an incoming CSR waiting for approval.
@@ -279,13 +281,16 @@ func SaveSignedSignature(
 	expiryDate string,
 	pemData string,
 ) {
-	Db.Exec(`INSERT INTO certificates (serial_number, subject, status, issue_date, expiry_date, pem_data) 
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		serialNumber, subject, status, issueDate, expiryDate, pemData)
+	_, err := Db.Exec(`INSERT INTO certificates (serial_number, subject, status, valid_not_before, valid_not_after, request_id, authority_id, type) 
+		VALUES (?, ?, ?, ?, ?, 0, 0, 'BOTH')`,
+		serialNumber, subject, status, issueDate, expiryDate)
+	if err != nil {
+		log.Printf("Failed to insert certificate into database: %v\n", err)
+	}
 }
 
 func GetValidCertificates() ([]CertRecord, error) {
-	rows, err := Db.Query(`SELECT serial_number, subject, status, expiry_date FROM certificates WHERE status = 'ACTIVE' ORDER BY expiry_date ASC`)
+	rows, err := Db.Query(`SELECT serial_number, subject, status, valid_not_before, valid_not_after FROM certificates WHERE status = 'ACTIVE' ORDER BY valid_not_after ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -294,9 +299,11 @@ func GetValidCertificates() ([]CertRecord, error) {
 	certs := []CertRecord{}
 	for rows.Next() {
 		var c CertRecord
-		var exp string
-		rows.Scan(&c.Serial, &c.Subject, &c.Status, &exp)
-		c.Expiry = exp
+		var notBefore, notAfter string
+		rows.Scan(&c.Serial, &c.Subject, &c.Status, &notBefore, &notAfter)
+		c.NotBefore = notBefore
+		c.NotAfter = notAfter
+		c.Expiry = notAfter
 		certs = append(certs, c)
 	}
 
