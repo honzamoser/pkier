@@ -33,8 +33,47 @@ func (u *PassKeyUser) WebAuthnCredentials() []webauthn.Credential { return u.Cre
 var (
 	registrationSessions sync.Map
 	assertionSessions    sync.Map
+	loginSessions        sync.Map
 	signingVerifications sync.Map
 )
+
+func CheckPasskeys(w http.ResponseWriter, r *http.Request) {
+	credentials, err := db.GetAdminWebAuthnCredentials("admin")
+	if err != nil || len(credentials) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"has_passkeys": false})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"has_passkeys": true})
+}
+
+// getUnauthPasskeyUser gets the user struct without checking JWT. Used for initial setup and login.
+func getUnauthPasskeyUserAndWebAuthn(r *http.Request) (*PassKeyUser, *webauthn.WebAuthn, string, error) {
+	username := "admin" // Hardcode admin for this CA setup
+	adminID, err := db.GetAdminID(username)
+	if err != nil {
+		return nil, nil, "", errors.New("unknown admin")
+	}
+
+	credentials, err := db.GetAdminWebAuthnCredentials(username)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to load passkeys")
+	}
+
+	user := &PassKeyUser{
+		ID:          []byte(fmt.Sprintf("admin-%d", adminID)),
+		Username:    username,
+		Credentials: credentials,
+	}
+
+	wa, err := webauthnForRequest(r)
+	if err != nil {
+		return nil, nil, "", errors.New("failed to initialize webauthn")
+	}
+
+	return user, wa, username, nil
+}
 
 func BeginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -42,7 +81,18 @@ func BeginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, wa, username, err := getCurrentPasskeyUserAndWebAuthn(r)
+	// IF there are no passkeys, we allow unauthenticated registration (Initial Setup).
+	var user *PassKeyUser
+	var wa *webauthn.WebAuthn
+	var username string
+	var err error
+
+	credentials, _ := db.GetAdminWebAuthnCredentials("admin")
+	if len(credentials) == 0 {
+		user, wa, username, err = getUnauthPasskeyUserAndWebAuthn(r)
+	} else {
+		user, wa, username, err = getCurrentPasskeyUserAndWebAuthn(r)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -66,7 +116,20 @@ func FinishPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, wa, username, err := getCurrentPasskeyUserAndWebAuthn(r)
+	var user *PassKeyUser
+	var wa *webauthn.WebAuthn
+	var username string
+	var err error
+
+	credentials, _ := db.GetAdminWebAuthnCredentials("admin")
+	isInitialSetup := len(credentials) == 0
+
+	if isInitialSetup {
+		user, wa, username, err = getUnauthPasskeyUserAndWebAuthn(r)
+	} else {
+		user, wa, username, err = getCurrentPasskeyUserAndWebAuthn(r)
+	}
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -87,7 +150,7 @@ func FinishPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
 
 	credential, err := wa.FinishRegistration(user, session, r)
 	if err != nil {
-		http.Error(w, "Passkey registration failed", http.StatusBadRequest)
+		http.Error(w, "Passkey registration failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -96,10 +159,103 @@ func FinishPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If it was initial setup, let's log them in automatically
+	if isInitialSetup {
+		token, err := GenerateToken(username)
+		if err == nil {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "Authentication",
+				Value:    token,
+				HttpOnly: true,
+				Path:     "/",
+				MaxAge:   86400,
+			})
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
+// For Authentication to the web app
+func BeginPasskeyLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	user, wa, username, err := getUnauthPasskeyUserAndWebAuthn(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(user.Credentials) == 0 {
+		http.Error(w, "No passkeys registered for admin", http.StatusBadRequest)
+		return
+	}
+
+	options, session, err := wa.BeginLogin(user)
+	if err != nil {
+		http.Error(w, "Failed to begin passkey verification", http.StatusInternalServerError)
+		return
+	}
+
+	loginSessions.Store(username, *session)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(options)
+}
+
+func FinishPasskeyLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	user, wa, username, err := getUnauthPasskeyUserAndWebAuthn(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	rawSession, ok := loginSessions.Load(username)
+	if !ok {
+		http.Error(w, "Login session not found", http.StatusBadRequest)
+		return
+	}
+	defer loginSessions.Delete(username)
+
+	session, ok := rawSession.(webauthn.SessionData)
+	if !ok {
+		http.Error(w, "Invalid login session", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := wa.FinishLogin(user, session, r); err != nil {
+		http.Error(w, "Passkey verification failed", http.StatusUnauthorized)
+		return
+	}
+
+	// Login Success! Give them the JWT
+	token, err := GenerateToken(username)
+	if err != nil {
+		http.Error(w, "Token error", http.StatusInternalServerError)
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "Authentication",
+		Value:    token,
+		HttpOnly: true,
+		Path:     "/",
+		MaxAge:   86400,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// For elevated permissions during an active session
 func BeginPasskeyAssertion(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

@@ -187,7 +187,7 @@ func InitalizeDB(cfg *config.Config) {
 		return
 	}
 
-	query := `CREATE TABLE certificate_requests (
+	query := `CREATE TABLE IF NOT EXISTS certificate_requests (
     	id INTEGER PRIMARY KEY AUTOINCREMENT,
     	raw_csr_pem TEXT NOT NULL,
     	subject TEXT NOT NULL,
@@ -204,7 +204,7 @@ func InitalizeDB(cfg *config.Config) {
     	FOREIGN KEY(resolved_by_user_id) REFERENCES users(id)
 	);
 	
-	CREATE TABLE certificates (
+	CREATE TABLE IF NOT EXISTS certificates (
 	    -- The PK is the 160-bit serial number stored as a string
 	    serial_number TEXT PRIMARY KEY, 
 	
@@ -251,7 +251,7 @@ func InitalizeDB(cfg *config.Config) {
 		FOREIGN KEY (admin_id) REFERENCES admins(id)
 	);
 
-	CREATE TABLE authorities (
+	CREATE TABLE IF NOT EXISTS authorities (
     	id INTEGER PRIMARY KEY AUTOINCREMENT,
     	name TEXT NOT NULL,
     	type TEXT NOT NULL, -- 'ROOT' or 'INTERMEDIATE'
@@ -285,7 +285,7 @@ func SaveSignedSignature(
 }
 
 func GetValidCertificates() ([]CertRecord, error) {
-	rows, err := Db.Query("SELECT serial_number, subject, status, expiry_date FROM certificates ORDER BY issue_date DESC")
+	rows, err := Db.Query(`SELECT serial_number, subject, status, expiry_date FROM certificates WHERE status = 'ACTIVE' ORDER BY expiry_date ASC`)
 	if err != nil {
 		return nil, err
 	}

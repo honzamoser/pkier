@@ -22,10 +22,13 @@ func main() {
 
 	server.RegisterHandler("/api/sign", ca.HandleSignCSR)
 	server.RegisterHandler("/api/auth", auth.SignIn)
+	server.RegisterHandler("/api/passkey/login/begin", auth.BeginPasskeyLogin)
+	server.RegisterHandler("/api/passkey/login/finish", auth.FinishPasskeyLogin)
 	server.RegisterHandler("/api/passkey/register/begin", auth.BeginPasskeyRegistration)
 	server.RegisterHandler("/api/passkey/register/finish", auth.FinishPasskeyRegistration)
 	server.RegisterHandler("/api/passkey/assertion/begin", auth.BeginPasskeyAssertion)
 	server.RegisterHandler("/api/passkey/assertion/finish", auth.FinishPasskeyAssertion)
+	server.RegisterHandler("/api/passkey/status", auth.CheckPasskeys)
 
 	server.StartServer()
 
