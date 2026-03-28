@@ -6,8 +6,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Lightweight CA Manager</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css">
-    <script src="https://unpkg.com/asn1js@3.0.5/build/index.js"></script>
-    <script src="https://unpkg.com/pkijs@3.4.0/build/index.js"></script>
 </head>
 
 <body>
@@ -29,6 +27,16 @@
         <section>
             <h3>Upload CSR</h3>
             <form id="csrForm">
+                <fieldset>
+                    <label for="switch-server">
+                        <input type="checkbox" id="switch-server" role="switch" checked>
+                        Server
+                    </label>
+                    <label for="switch-client">
+                        <input type="checkbox" id="switch-client" role="switch">
+                        Client
+                    </label>
+                </fieldset>
                 <label for="csrInput">Paste your PEM-encoded CSR here:</label>
                 <textarea id="csrInput" rows="6" placeholder="-----BEGIN CERTIFICATE REQUEST-----..."
                     required></textarea>
@@ -61,60 +69,6 @@
         </section>
     </main>
 
-    <h2>Generate CSR in Browser</h2>
-    <button onclick="generateCSR()">Generate Keypair & CSR</button>
-
-    <h3>CSR (Send this to the server):</h3>
-    <textarea id="csrOutput" rows="10" cols="70" readonly></textarea>
-
-    <h3>Private Key (STAY ON CLIENT):</h3>
-    <textarea id="keyOutput" rows="10" cols="70" readonly></textarea>
-
-    <script>
-        async function generateCSR() {
-            const commonName = "example.com";
-
-            // 1. Generate RSA Keypair using Web Crypto API
-            const algorithm = {
-                name: "RSASSA-PKCS1-v1_5",
-                modulusLength: 2048,
-                publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
-                hash: "SHA-256",
-            };
-
-            const keyPair = await window.crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
-
-            // 2. Initialize PKI.js CSR object
-            const pkijs = window.pkijs;
-            const pkcs10 = new pkijs.CertificationRequest();
-
-            // Set Subject Name
-            pkcs10.subject.typesAndValues.push(new pkijs.AttributeTypeAndValue({
-                type: "2.5.4.3", // Common Name (CN)
-                value: new asn1js.Utf8String({ value: commonName })
-            }));
-
-            // Attach Public Key to CSR
-            await pkcs10.subjectPublicKeyInfo.importKey(keyPair.publicKey);
-
-            // 3. Sign the CSR with the Private Key
-            await pkcs10.sign(keyPair.privateKey, "SHA-256");
-
-            // 4. Convert to PEM format
-            const csrBuffer = pkcs10.toSchema().toBER(false);
-            document.getElementById('csrOutput').value = formatPem(csrBuffer, "CERTIFICATE REQUEST");
-
-            // 5. Export Private Key (PKCS#8) for local storage
-            const privateKeyBuffer = await window.crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
-            document.getElementById('keyOutput').value = formatPem(privateKeyBuffer, "PRIVATE KEY");
-        }
-
-        function formatPem(buffer, label) {
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
-            const lines = base64.match(/.{1,64}/g).join('\n');
-            return `-----BEGIN ${label}-----\n${lines}\n-----END ${label}-----`;
-        }
-    </script>
 
     <script>
         function base64UrlToBuffer(base64url) {
@@ -192,6 +146,8 @@
         document.getElementById('csrForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const csrText = document.getElementById('csrInput').value;
+            const isClient = document.getElementById('switch-client').checked;
+            const isServer = document.getElementById('switch-server').checked;
 
             try {
                 await verifyPasskeyForSigning();
@@ -200,7 +156,7 @@
                 return;
             }
 
-            const response = await fetch('/api/sign', {
+            const response = await fetch(`/api/sign?client=${isClient}&server=${isServer}`, {
                 method: 'POST',
                 body: csrText
             });

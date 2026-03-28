@@ -1,9 +1,6 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/x509"
-
 	"pkie/auth"
 	"pkie/ca"
 	"pkie/config"
@@ -11,28 +8,17 @@ import (
 	"pkie/server"
 
 	_ "github.com/mattn/go-sqlite3"
-	"software.sslmate.com/src/go-pkcs12"
 )
 
 var KEY_DIR = "./keys"
 
-var (
-	caPrivKey     *ecdsa.PrivateKey
-	caCert        *x509.Certificate
-	pkcs12Encoder *pkcs12.Encoder
-)
-
-type CertRecord struct {
-	Serial  string `json:"serial"`
-	Subject string `json:"subject"`
-	Status  string `json:"status"`
-	Expiry  string `json:"expiry"`
-}
-
 func main() {
-	config.GetConfig()
-	db.InitalizeDB()
-	ca.InitCA()
+	defaultConfig, err := config.Load("./config.toml")
+	if err != nil {
+		panic(err)
+	}
+	db.InitalizeDB(defaultConfig)
+	ca.InitCA(defaultConfig)
 
 	server.RegisterHandler("/api/sign", ca.HandleSignCSR)
 	server.RegisterHandler("/api/auth", auth.SignIn)

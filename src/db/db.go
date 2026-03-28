@@ -1,10 +1,13 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"log"
+	"pkie/config"
+	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"golang.org/x/crypto/bcrypt"
@@ -19,11 +22,160 @@ type CertRecord struct {
 	Expiry  string `json:"expiry"`
 }
 
-func InitalizeDB() {
+// CertificateRequest represents an incoming CSR waiting for approval.
+type CertificateRequest struct {
+	ID             int64
+	RawCSRPEM      string
+	Subject        string
+	RequestedSANs  []string // We will marshal/unmarshal this to JSON
+	Status         string   // PENDING, APPROVED, REJECTED
+	RequestedAt    time.Time
+	ResolvedAt     *time.Time // Pointer because it can be NULL
+	ResolvedByUser *int64     // Pointer because it can be NULL
+}
+
+// Certificate represents a finalized, signed X.509 certificate.
+type Certificate struct {
+	SerialNumber     string // 160-bit int stored as hex string
+	RequestID        int64
+	AuthorityID      int64
+	Type             string // SERVER, CLIENT, BOTH
+	Subject          string
+	SANs             []string
+	ValidNotBefore   time.Time
+	ValidNotAfter    time.Time
+	Status           string // ACTIVE, REVOKED, EXPIRED
+	RevokedAt        *time.Time
+	RevocationReason *string
+	CreatedAt        time.Time
+}
+
+// PKIDAO handles all database operations for the CA pipeline.
+type PKIDAO struct {
+	db *sql.DB
+}
+
+// NewPKIDAO initializes a new DAO.
+// Note: Ensure your DSN includes "?parseTime=true" when opening the sqlite3 DB!
+func NewPKIDAO(db *sql.DB) *PKIDAO {
+	return &PKIDAO{db: db}
+}
+
+// ==========================================
+// Certificate Request Operations
+// ==========================================
+
+// InsertRequest saves a new CSR submitted by a device.
+func (dao *PKIDAO) InsertRequest(ctx context.Context, req *CertificateRequest) (int64, error) {
+	query := `
+		INSERT INTO certificate_requests (raw_csr_pem, subject, requested_sans_json, status)
+		VALUES (?, ?, ?, 'PENDING')
+	`
+
+	sansJSON, err := json.Marshal(req.RequestedSANs)
+	if err != nil {
+		return 0, err
+	}
+
+	result, err := dao.db.ExecContext(ctx, query, req.RawCSRPEM, req.Subject, string(sansJSON))
+	if err != nil {
+		return 0, err
+	}
+
+	return result.LastInsertId()
+}
+
+// GetPendingRequests fetches all unapproved CSRs for the admin dashboard.
+func (dao *PKIDAO) GetPendingRequests(ctx context.Context) ([]*CertificateRequest, error) {
+	query := `
+		SELECT id, raw_csr_pem, subject, requested_sans_json, status, requested_at 
+		FROM certificate_requests 
+		WHERE status = 'PENDING' 
+		ORDER BY requested_at ASC
+	`
+	rows, err := dao.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var requests []*CertificateRequest
+	for rows.Next() {
+		var req CertificateRequest
+		var sansJSON string
+
+		err := rows.Scan(
+			&req.ID, &req.RawCSRPEM, &req.Subject,
+			&sansJSON, &req.Status, &req.RequestedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := json.Unmarshal([]byte(sansJSON), &req.RequestedSANs); err != nil {
+			return nil, err
+		}
+
+		requests = append(requests, &req)
+	}
+
+	return requests, rows.Err()
+}
+
+// ResolveRequest is called when you click "Approve" or "Reject" in the dashboard.
+func (dao *PKIDAO) ResolveRequest(ctx context.Context, requestID int64, status string, userID int64) error {
+	query := `
+		UPDATE certificate_requests 
+		SET status = ?, resolved_at = CURRENT_TIMESTAMP, resolved_by_user_id = ?
+		WHERE id = ? AND status = 'PENDING'
+	`
+	_, err := dao.db.ExecContext(ctx, query, status, userID, requestID)
+	return err
+}
+
+// ==========================================
+// Certificate Operations
+// ==========================================
+
+// InsertCertificate saves the finalized certificate after signing.
+// Ideally, you would call this inside a database transaction alongside ResolveRequest.
+func (dao *PKIDAO) InsertCertificate(ctx context.Context, cert *Certificate) error {
+	query := `
+		INSERT INTO certificates (
+			serial_number, request_id, authority_id, type, subject, 
+			sans_json, valid_not_before, valid_not_after, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
+	`
+
+	sansJSON, err := json.Marshal(cert.SANs)
+	if err != nil {
+		return err
+	}
+
+	_, err = dao.db.ExecContext(ctx, query,
+		cert.SerialNumber, cert.RequestID, cert.AuthorityID, cert.Type,
+		cert.Subject, string(sansJSON), cert.ValidNotBefore, cert.ValidNotAfter,
+	)
+
+	return err
+}
+
+// RevokeCertificate marks a certificate as revoked so it can be added to the next CRL.
+func (dao *PKIDAO) RevokeCertificate(ctx context.Context, serialNumber string, reason string) error {
+	query := `
+		UPDATE certificates 
+		SET status = 'REVOKED', revoked_at = CURRENT_TIMESTAMP, revocation_reason = ?
+		WHERE serial_number = ? AND status = 'ACTIVE'
+	`
+	_, err := dao.db.ExecContext(ctx, query, reason, serialNumber)
+	return err
+}
+
+func InitalizeDB(cfg *config.Config) {
 
 	var err error
 	// 1. Init Database
-	Db, err = sql.Open("sqlite3", "./light_pki.db")
+	Db, err = sql.Open(cfg.Database.Driver, cfg.Database.DSN+"?parseTime=true")
 	if err != nil {
 		log.Fatalf("DB error: %v", err)
 	}
@@ -35,13 +187,45 @@ func InitalizeDB() {
 		return
 	}
 
-	query := `CREATE TABLE IF NOT EXISTS certificates (
-		serial_number TEXT PRIMARY KEY,
-		subject TEXT NOT NULL,
-		status TEXT NOT NULL,
-		issue_date DATETIME NOT NULL,
-		expiry_date DATETIME NOT NULL,
-		pem_data TEXT NOT NULL
+	query := `CREATE TABLE certificate_requests (
+    	id INTEGER PRIMARY KEY AUTOINCREMENT,
+    	raw_csr_pem TEXT NOT NULL,
+    	subject TEXT NOT NULL,
+	
+    	-- Store parsed SANs as a JSON array: '["homelab.local", "192.168.1.50"]'
+    	requested_sans_json TEXT, 
+	
+    	status TEXT NOT NULL DEFAULT 'PENDING', -- 'PENDING', 'APPROVED', 'REJECTED'
+	
+    	-- Audit trail
+    	requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    	resolved_at DATETIME,
+    	resolved_by_user_id INTEGER,
+    	FOREIGN KEY(resolved_by_user_id) REFERENCES users(id)
+	);
+	
+	CREATE TABLE certificates (
+	    -- The PK is the 160-bit serial number stored as a string
+	    serial_number TEXT PRIMARY KEY, 
+	
+	    request_id INTEGER NOT NULL,
+	    authority_id INTEGER NOT NULL, -- Which Intermediate CA signed this?
+	
+	    type TEXT NOT NULL, -- 'SERVER', 'CLIENT', or 'BOTH'
+	    subject TEXT NOT NULL,
+	    sans_json TEXT,
+	
+	    valid_not_before DATETIME NOT NULL,
+	    valid_not_after DATETIME NOT NULL,
+	
+	    status TEXT NOT NULL DEFAULT 'ACTIVE', -- 'ACTIVE', 'REVOKED', 'EXPIRED'
+	    revoked_at DATETIME,
+	    revocation_reason TEXT,
+	
+	    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+	
+	    FOREIGN KEY(request_id) REFERENCES certificate_requests(id),
+	    FOREIGN KEY(authority_id) REFERENCES authorities(id)
 	);
 	
 	CREATE TABLE IF NOT EXISTS admins (
@@ -65,6 +249,20 @@ func InitalizeDB() {
 		created_at DATETIME NOT NULL,
 		admin_id INTEGER NOT NULL,
 		FOREIGN KEY (admin_id) REFERENCES admins(id)
+	);
+
+	CREATE TABLE authorities (
+    	id INTEGER PRIMARY KEY AUTOINCREMENT,
+    	name TEXT NOT NULL,
+    	type TEXT NOT NULL, -- 'ROOT' or 'INTERMEDIATE'
+    	parent_authority_id INTEGER, -- NULL if Root
+    	serial_number TEXT UNIQUE NOT NULL,
+    	subject TEXT NOT NULL,
+    	valid_not_before DATETIME NOT NULL,
+    	valid_not_after DATETIME NOT NULL,
+    	status TEXT NOT NULL DEFAULT 'ACTIVE', -- 'ACTIVE', 'REVOKED', 'EXPIRED'
+    	created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    	FOREIGN KEY(parent_authority_id) REFERENCES authorities(id)
 	);
 	
 	INSERT OR IGNORE INTO admins (username, password_hash) VALUES ('admin', ?);`

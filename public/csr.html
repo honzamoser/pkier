@@ -88,7 +88,7 @@
                 hash: "SHA-256",
             };
 
-            const SANs = new pkijs.GeneralNames({
+            let SANs = new pkijs.GeneralNames({
                 names: [
                     new pkijs.GeneralName({
                         type: 2, // DNS
@@ -99,7 +99,7 @@
                         value: "*.mosii.xyz"
                     }),
                 ]
-            });
+            })
 
             const keyPair = await window.crypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
 
@@ -112,7 +112,7 @@
                     new pkijs.Extensions({
                         extensions: [
                             new pkijs.Extension({
-                                extnID: "2.5.29.17", // subjectAltName
+                                extnID: "2.5.29.17", // Extension Request
                                 critical: false,
                                 extnValue: SANs.toSchema().toBER(false)
                             })

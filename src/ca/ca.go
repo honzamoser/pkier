@@ -7,28 +7,30 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"pkie/auth"
-	"pkie/config"
 	"pkie/db"
 	"strconv"
 	"strings"
 	"time"
+
+	"pkie/config"
 )
 
 var KEY_DIR = "./keys"
 
 var (
-	caRegistry = make(map[int]*CAEntry)
+	caRegistry    = make(map[int]*CAEntry)
 	rootCAPrivKey *ecdsa.PrivateKey
 	rootCACert    *x509.Certificate
+	cfg           *config.Config
 )
 
 type CAEntry struct {
@@ -39,7 +41,6 @@ type CAEntry struct {
 	Cert    *x509.Certificate
 	CertPEM string
 }
-
 
 func checkExists(fileName string) bool {
 	_, err := os.Stat(fileName)
@@ -58,35 +59,25 @@ func createKeyFiles() (*os.File, *os.File) {
 	certFile, _ := os.Create(KEY_DIR + "/ca_cert.pem")
 	return keyFile, certFile
 }
-	func InitCA() {
+
+func InitCA(c *config.Config) {
+	cfg = c
 	caKeyExists := checkExists(KEY_DIR + "/ca_key.pem")
 	caCertExists := checkExists(KEY_DIR + "/ca_cert.pem")
 
 	if !caCertExists || !caKeyExists {
 		fmt.Println("No existing CA found, generating new one...")
 
-		rootCAPrivKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		caTemplate := x509.Certificate{
-			SerialNumber:          big.NewInt(1),
-			Subject:               pkix.Name{CommonName: "Lightweight Root CA"},
-			NotBefore:             time.Now(),
-			NotAfter:              time.Now().AddDate(10, 0, 0),
-			IsCA:                  true,
-			BasicConstraintsValid: true,
+		if caKeyExists {
+			os.Remove(KEY_DIR + "/ca_key.pem")
 		}
-		caBytes, _ := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &rootCAPrivKey.PublicKey, rootCAPrivKey)
-		rootCACert, _ = x509.ParseCertificate(caBytes)
-		fmt.Println("✅ Root CA Initialized")
 
-		// Save to PEM files
-		os.MkdirAll(KEY_DIR, 0700)
-		clearKeyDir()
-		keyFile, certFile := createKeyFiles()
+		if caCertExists {
+			os.Remove(KEY_DIR + "/ca_cert.pem")
+		}
 
-		var pemMarshalled, _ = x509.MarshalECPrivateKey(rootCAPrivKey)
+		generateRootCA()
 
-		pem.Encode(keyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: pemMarshalled})
-		pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: caBytes})
 	} else {
 		fmt.Println("Existing CA found, loading from files...")
 		keyData, _ := os.ReadFile(KEY_DIR + "/ca_key.pem")
@@ -110,121 +101,32 @@ func createKeyFiles() (*os.File, *os.File) {
 		Cert:    rootCACert,
 		CertPEM: string(certPEMData),
 	}
+}
 
-	cas, err := db.GetCAs()
-	if err == nil {
-		for _, c := range cas {
-			cb, _ := pem.Decode([]byte(c.CertPEM))
-			kb, _ := pem.Decode([]byte(c.KeyPEM))
-			var priv *ecdsa.PrivateKey
-			if kb != nil {
-				priv, _ = x509.ParseECPrivateKey(kb.Bytes)
-				if priv == nil {
-					keyAny, _ := x509.ParsePKCS8PrivateKey(kb.Bytes)
-					if keyAny != nil {
-					     priv = keyAny.(*ecdsa.PrivateKey)
-					}
-				}
-			}
-			var cert *x509.Certificate
-			if cb != nil {
-				cert, _ = x509.ParseCertificate(cb.Bytes)
-			}
-			caRegistry[c.ID] = &CAEntry{
-				ID:      c.ID,
-				Name:    c.Name,
-				CAType:  c.CAType,
-				PrivKey: priv,
-				Cert:    cert,
-				CertPEM: c.CertPEM,
-			}
-		}
+func generateRootCA() {
+	rootCAPrivKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caTemplate := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Lightweight Root CA"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
 	}
+	caBytes, _ := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &rootCAPrivKey.PublicKey, rootCAPrivKey)
+	rootCACert, _ = x509.ParseCertificate(caBytes)
+	fmt.Println("✅ Root CA Initialized")
+
+	// Save to PEM files
+	os.MkdirAll(KEY_DIR, 0700)
+	clearKeyDir()
+	keyFile, certFile := createKeyFiles()
+
+	var pemMarshalled, _ = x509.MarshalECPrivateKey(rootCAPrivKey)
+
+	pem.Encode(keyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: pemMarshalled})
+	pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: caBytes})
 }
-
-func HandleListCAs(w http.ResponseWriter, r *http.Request) {
-    if !auth.ValidateAuthentication(r) {
-        http.Error(w, "Unauthorized", http.StatusUnauthorized)
-        return
-    }
-    
-    type caResp struct {
-        ID int `json:"id"`
-        Name string `json:"name"`
-        CAType string `json:"ca_type"`
-        CertPEM string `json:"cert_pem"`
-    }
-    
-    var resp []caResp
-    for _, ca := range caRegistry {
-        resp = append(resp, caResp{
-            ID: ca.ID,
-            Name: ca.Name,
-            CAType: ca.CAType,
-            CertPEM: ca.CertPEM,
-        })
-    }
-    
-    w.Header().Set("Content-Type", "application/json")
-    json.NewEncoder(w).Encode(resp)
-}
-
-func HandleAddCA(w http.ResponseWriter, r *http.Request) {
-    if !auth.ValidateAuthentication(r) {
-        http.Error(w, "Unauthorized", http.StatusUnauthorized)
-        return
-    }
-    if r.Method != http.MethodPost {
-        http.Error(w, "Method format invalid", http.StatusMethodNotAllowed)
-        return
-    }
-
-    var req struct {
-        Name    string `json:"name"`
-        CAType  string `json:"ca_type"`
-        CertPEM string `json:"cert_pem"`
-        KeyPEM  string `json:"key_pem"`
-    }
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        http.Error(w, "Invalid Request", http.StatusBadRequest)
-        return
-    }
-
-    if err := db.InsertCA(req.Name, req.CAType, req.CertPEM, req.KeyPEM); err != nil {
-        http.Error(w, "DB Insert Error", http.StatusInternalServerError)
-        return
-    }
-    
-    InitCA()
-    w.Write([]byte("OK"))
-}
-
-func HandleDeleteCA(w http.ResponseWriter, r *http.Request) {
-    if !auth.ValidateAuthentication(r) {
-        http.Error(w, "Unauthorized", http.StatusUnauthorized)
-        return
-    }
-    if r.Method != http.MethodPost {
-        http.Error(w, "Method format invalid", http.StatusMethodNotAllowed)
-        return
-    }
-    
-    idStr := r.URL.Query().Get("id")
-    id, _ := strconv.Atoi(idStr)
-    if id == 0 {
-         http.Error(w, "Cannot delete root", http.StatusBadRequest)
-         return
-    }
-    
-    if err := db.DeleteCA(id); err != nil {
-        http.Error(w, "DB Delete Error", http.StatusInternalServerError)
-        return
-    }
-    
-    delete(caRegistry, id)
-    w.Write([]byte("OK"))
-}
-
 
 func HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 
@@ -237,8 +139,6 @@ func HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-
-	config := config.GetConfig()
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -259,7 +159,7 @@ func HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := validateCSRPolicySANs(csr, config.Policy.DefaultSANs); err != nil {
+	if err := validateCSRPolicySANs(csr, cfg.PKI.Policy); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -269,6 +169,16 @@ func HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 	notBefore := time.Now()
 	notAfter := notBefore.AddDate(1, 0, 0) // 1 year validity
 
+	var extKeyUsage []x509.ExtKeyUsage
+	if r.URL.Query().Get("server") == "true" {
+		extKeyUsage = append(extKeyUsage, x509.ExtKeyUsageServerAuth)
+	}
+	if r.URL.Query().Get("client") == "true" {
+		extKeyUsage = append(extKeyUsage, x509.ExtKeyUsageClientAuth)
+	}
+
+	log.Printf("Signing CSR for CN=%s, DNS=%v, IPs=%v", csr.Subject.CommonName, csr.DNSNames, csr.IPAddresses)
+
 	template := x509.Certificate{
 		SerialNumber:          serialNumber,
 		Subject:               csr.Subject,
@@ -277,7 +187,7 @@ func HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:           extKeyUsage,
 		BasicConstraintsValid: true,
 	}
 
@@ -312,20 +222,22 @@ func HandleSignCSR(w http.ResponseWriter, r *http.Request) {
 	w.Write(certPEM)
 }
 
-func validateCSRPolicySANs(csr *x509.CertificateRequest, policySANs config.DefaultSANsConfig) error {
+func validateCSRPolicySANs(csr *x509.CertificateRequest, policySANs config.PolicyConfig) error {
+
+	log.Printf("Validating CSR for CN=%s, DNS=%v, IPs=%v", csr.Subject.CommonName, csr.DNSNames, csr.IPAddresses)
 	hasDNS := len(csr.DNSNames) > 0
 	hasIPs := len(csr.IPAddresses) > 0
 	if !hasDNS && !hasIPs {
 		return fmt.Errorf("CSR must include at least one SAN entry (DNS or IP)")
 	}
 
-	allowedDNS := make(map[string]struct{}, len(policySANs.DNS))
-	for _, d := range policySANs.DNS {
+	allowedDNS := make(map[string]struct{}, len(policySANs.AllowedDomains))
+	for _, d := range policySANs.AllowedDomains {
 		allowedDNS[strings.ToLower(strings.TrimSpace(d))] = struct{}{}
 	}
 
-	allowedIPs := make(map[string]struct{}, len(policySANs.IPs))
-	for _, ip := range policySANs.IPs {
+	allowedIPs := make(map[string]struct{}, len(policySANs.AllowedIPs))
+	for _, ip := range policySANs.AllowedIPs {
 		parsed := net.ParseIP(strings.TrimSpace(ip))
 		if parsed == nil {
 			continue

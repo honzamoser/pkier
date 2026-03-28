@@ -1,12 +1,47 @@
-[dn]
-cn = "jan Moser"
+[server]
+listen_addr = ":8443"
+tls_cert_path = "./data/certs/ui-cert.pem"
+tls_key_path = "./data/certs/ui-key.pem"
+log_level = "info"
 
-[policy]
-allow_wildcaards = true
-min_rsa_bits = 2048
-allowed_domains = ["localhost"]
+[database]
+driver = "sqlite3"
+dsn = "./light_pki.db"
 
-[policy.default_sans]
-dns = ["localhost", "mosii.xyz", "*.mosii.xyz"]
-ips = ["127.0.0.1"]
+[pki]
+key_storage_dir = "./data/keys"
 
+[pki.dn]
+# Distinguished Name (DN) defaults for generated certificates.
+# Arrays are used here because X.509 allows multiple values for these fields.
+country = ["CZ"]
+state = ["Zlinsky_kraj"]
+organization = ["MOSII"]
+
+
+[pki.ttl]
+root_ca = "87600h"         # 10 years
+intermediate_ca = "43800h" # 5 years
+server_leaf = "8760h"      # 1 year
+client_leaf = "8760h"      # 1 year
+
+[pki.keys]
+# Supported algorithms: "RSA" or "ECDSA"
+algorithm = "ECDSA"
+# Bit sizes. For RSA: 2048, 4096. For ECDSA: 256, 384, 521.
+ca_size = 384
+leaf_size = 256
+
+[pki.policy]
+# Restrict the Subject Alternative Names (SANs) that can be requested.
+# Use CIDR notation for IPs and standard wildcard notation for domains.
+allowed_domains = ["mosii.xyz", "*.mosii.xyz"]
+allowed_ips = ["192.168.1.0/24", "10.0.0.0/8"]
+
+[webauthn]
+rp_display_name = "Homelab CA Authority"
+rp_id = "ca.homelab.local"
+rp_origin = "https://ca.homelab.local:8443"
+
+[dashboard]
+session_secret = "super-secret-32-byte-session-key-!"
